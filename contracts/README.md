@@ -25,30 +25,41 @@ contracts/
 
 ## 🚀 Setup
 
-### 1. Install Foundry
-
-```bash
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
-```
-
-### 2. Install Dependencies
+### Quick Setup (Recommended)
 
 ```bash
 cd contracts
+./install.sh
+```
 
-# Install Uniswap v4 core
+This script will:
+- ✅ Install Foundry (if not already installed)
+- ✅ Install all dependencies (v4-core, v4-periphery, forge-std)
+- ✅ Build contracts
+- ✅ Run tests
+
+### Manual Setup
+
+If you prefer manual installation:
+
+```bash
+# 1. Install Foundry
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# 2. Install dependencies
+cd contracts
 forge install Uniswap/v4-core
-
-# Install Uniswap v4 periphery (hooks library)
 forge install Uniswap/v4-periphery
 
-# Install OpenZeppelin (if needed)
-forge install OpenZeppelin/openzeppelin-contracts
+# 3. Build
+forge build
 
-# Install forge-std
-forge install foundry-rs/forge-std
+# 4. Test
+forge test
 ```
+
+**Note:** The `lib/` directory is gitignored. Dependencies are installed locally and not tracked in git.
 
 ### 3. Environment Variables
 
