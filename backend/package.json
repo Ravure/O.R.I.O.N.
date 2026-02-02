@@ -8,16 +8,20 @@
         "build": "tsc",
         "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
         "ens:read": "tsx src/scripts/readENS.ts",
-        "yellow:test": "tsx src/scripts/testYellow.ts"
+        "yellow:test": "tsx src/scripts/testYellow.ts",
+        "demo:trades": "tsx src/scripts/demoTrades.ts",
+        "demo:analytics": "tsx src/scripts/gasAnalytics.ts"
     },
     "dependencies": {
         "@erc7824/nitrolite": "^0.5.3",
         "dotenv": "^16.3.1",
         "ethers": "^6.9.0",
-        "viem": "^2.45.1"
+        "viem": "^2.45.1",
+        "ws": "^8.16.0"
     },
     "devDependencies": {
         "@types/node": "^20.10.0",
+        "@types/ws": "^8.5.10",
         "tsx": "^4.7.0",
         "typescript": "^5.3.3"
     }
