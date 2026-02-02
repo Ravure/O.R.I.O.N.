@@ -16,6 +16,8 @@ interface TradingStats {
   totalGasSaved: number;
   isConnected: boolean;
   sessionActive: boolean;
+  channelOpenCost: number;  // Cost to open channel
+  channelCloseCost: number; // Cost to close channel
 }
 
 /**
@@ -23,12 +25,19 @@ interface TradingStats {
  * Shows real-time trading activity and gas savings
  */
 export const TradingDashboard: React.FC = () => {
+  // Channel costs (one-time): ~100k gas each for open/close at 30 gwei, $2500 ETH
+  const CHANNEL_OPEN_COST = 7.50;  // Open channel tx
+  const CHANNEL_CLOSE_COST = 7.50; // Close/settle channel tx
+  const GAS_PER_TRADE_ONCHAIN = 11.25; // ~150k gas per swap
+
   const [stats, setStats] = useState<TradingStats>({
     totalTrades: 0,
     totalVolume: 0,
     totalGasSaved: 0,
     isConnected: false,
     sessionActive: false,
+    channelOpenCost: CHANNEL_OPEN_COST,
+    channelCloseCost: CHANNEL_CLOSE_COST,
   });
 
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -68,7 +77,7 @@ export const TradingDashboard: React.FC = () => {
         ...prev,
         totalTrades: prev.totalTrades + 1,
         totalVolume: prev.totalVolume + parseFloat(newTrade.amount),
-        totalGasSaved: prev.totalGasSaved + newTrade.gasSaved,
+        totalGasSaved: prev.totalGasSaved + GAS_PER_TRADE_ONCHAIN, // Save full on-chain cost per trade
         sessionActive: true,
       }));
     } catch {
@@ -145,15 +154,35 @@ export const TradingDashboard: React.FC = () => {
         </div>
 
         <div className="bg-white rounded-lg shadow p-6">
-          <div className="text-sm text-gray-500 uppercase tracking-wide">Gas Saved</div>
+          <div className="text-sm text-gray-500 uppercase tracking-wide">Net Savings</div>
           <div className="text-3xl font-bold text-green-600 mt-1">
-            ${(stats.totalGasSaved * 2.5).toFixed(2)}
+            ${Math.max(0, stats.totalGasSaved - (stats.sessionActive ? stats.channelOpenCost + stats.channelCloseCost : 0)).toFixed(2)}
           </div>
           <div className="text-sm text-gray-500 mt-1">
-            vs on-chain trading
+            after channel costs
           </div>
         </div>
       </div>
+
+      {/* Channel Cost Notice */}
+      {stats.sessionActive && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <span className="text-yellow-600 text-xl">⚠️</span>
+            <div>
+              <div className="font-medium text-yellow-800">State Channel Costs</div>
+              <div className="text-sm text-yellow-700 mt-1">
+                Opening channel: <span className="font-medium">${stats.channelOpenCost.toFixed(2)}</span> |
+                Closing channel: <span className="font-medium">${stats.channelCloseCost.toFixed(2)}</span> |
+                <span className="font-medium">Total: ${(stats.channelOpenCost + stats.channelCloseCost).toFixed(2)}</span>
+              </div>
+              <div className="text-sm text-yellow-600 mt-1">
+                All trades within the session are FREE. Channel costs are one-time.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Action Buttons */}
       <div className="flex justify-center gap-4">
@@ -191,19 +220,19 @@ export const TradingDashboard: React.FC = () => {
       {/* Gas Savings Comparison */}
       <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">
-          Gas Savings Comparison
+          Gas Cost Comparison
         </h3>
         <div className="grid grid-cols-2 gap-6">
           <div>
-            <div className="text-sm text-gray-600 mb-2">On-Chain Cost</div>
+            <div className="text-sm text-gray-600 mb-2">On-Chain Cost ({stats.totalTrades} trades)</div>
             <div className="h-8 bg-red-200 rounded relative overflow-hidden">
               <div
                 className="h-full bg-red-500 transition-all duration-500"
                 style={{ width: `${Math.min(stats.totalTrades * 10, 100)}%` }}
               />
             </div>
-            <div className="text-sm text-red-600 mt-1">
-              ${(stats.totalTrades * 3.5 * 2.5).toFixed(2)} (if on-chain)
+            <div className="text-sm text-red-600 mt-1 font-medium">
+              ${stats.totalGasSaved.toFixed(2)}
             </div>
           </div>
           <div>
@@ -211,14 +240,37 @@ export const TradingDashboard: React.FC = () => {
             <div className="h-8 bg-green-200 rounded relative overflow-hidden">
               <div
                 className="h-full bg-green-500 transition-all duration-500"
-                style={{ width: '0%' }}
+                style={{ width: stats.sessionActive ? '15%' : '0%' }}
               />
             </div>
-            <div className="text-sm text-green-600 mt-1">
-              $0.00 (state channels)
+            <div className="text-sm text-green-600 mt-1 font-medium">
+              ${stats.sessionActive ? (stats.channelOpenCost + stats.channelCloseCost).toFixed(2) : '0.00'} (open + close only)
             </div>
           </div>
         </div>
+
+        {stats.totalTrades > 0 && (
+          <div className="mt-4 pt-4 border-t border-green-200">
+            <div className="flex justify-between items-center">
+              <span className="text-gray-700">Savings per trade:</span>
+              <span className="font-medium text-green-600">
+                ${((stats.totalGasSaved - (stats.channelOpenCost + stats.channelCloseCost)) / stats.totalTrades).toFixed(2)}
+              </span>
+            </div>
+            <div className="flex justify-between items-center mt-1">
+              <span className="text-gray-700">Break-even at:</span>
+              <span className="font-medium text-blue-600">
+                {Math.ceil((stats.channelOpenCost + stats.channelCloseCost) / 11.25)} trades
+              </span>
+            </div>
+            <div className="flex justify-between items-center mt-1">
+              <span className="text-gray-700 font-medium">Total net savings:</span>
+              <span className="font-bold text-green-600 text-lg">
+                ${Math.max(0, stats.totalGasSaved - stats.channelOpenCost - stats.channelCloseCost).toFixed(2)}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Trade History */}
