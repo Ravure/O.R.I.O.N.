@@ -9,9 +9,10 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
+    "@erc7824/nitrolite": "^0.5.3",
+    "ethers": "^6.9.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "ethers": "^6.9.0",
     "zustand": "^4.4.7"
   },
   "devDependencies": {

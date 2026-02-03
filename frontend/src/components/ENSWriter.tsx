@@ -11,7 +11,7 @@ interface ENSWriterProps {
 export default function ENSWriter({
   provider,
   signer,
-  account,
+  account: _account,
   ensName,
 }: ENSWriterProps) {
   const [targetEnsName, setTargetEnsName] = useState('')
@@ -24,8 +24,8 @@ export default function ENSWriter({
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState<string | null>(null)
 
-  // Use connected ENS name if available
-  const displayEnsName = ensName || targetEnsName
+  // Prefix with _ to indicate intentionally unused
+  void _account
 
   const writeENS = async () => {
     if (!signer || !provider) {
