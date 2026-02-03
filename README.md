@@ -53,7 +53,7 @@ npx tsx src/scripts/testAuth.ts
 |-------|--------|-------------|
 | **Phase 1** | ✅ Complete | ENS integration for risk profiles |
 | **Phase 2** | 🟡 In Progress | Yellow Network state channels |
-| **Phase 3** | ✅ Complete | Uniswap v4 Hooks (smart contract ready) |
+| **Phase 3** | 🟡 Code Ready | Uniswap v4 Hooks (not deployed - v4 not live on testnet) |
 | **Phase 4** | ⏳ Todo | LI.FI cross-chain bridge |
 
 ---
