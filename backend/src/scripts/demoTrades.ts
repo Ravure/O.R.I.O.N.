@@ -96,19 +96,26 @@ async function runDemo(): Promise<void> {
     process.exit(1);
   }
 
-  // Step 2: Connect to ClearNode (simulated for demo)
+  // Step 2: Connect to ClearNode WebSocket
   logSection('Step 2: Connect to ClearNode WebSocket');
 
   log('📡 Attempting WebSocket connection...', colors.yellow);
   log('   Endpoint: wss://clearnet-sandbox.yellow.com/ws', colors.blue);
 
-  // Note: In production, this would be a real WebSocket connection
-  // For demo purposes, we'll simulate the connection
-  log('⚠️  Demo mode: Simulating WebSocket connection', colors.yellow);
-  log('   (Real connection requires Yellow Network sandbox access)\n', colors.yellow);
-
-  await sleep(1000);
-  log('✅ Connection established (simulated)', colors.green);
+  try {
+    await clearnode.connect();
+    log('✅ Connected to ClearNode WebSocket', colors.green);
+    
+    // Authenticate with ClearNode
+    log('🔐 Authenticating...', colors.yellow);
+    await clearnode.authenticate();
+    log('✅ Authentication successful', colors.green);
+  } catch (error: any) {
+    log(`⚠️  WebSocket connection failed: ${error.message}`, colors.yellow);
+    log('   Falling back to simulation mode...', colors.yellow);
+    await sleep(1000);
+    log('✅ Connection established (simulated)', colors.green);
+  }
 
   // Step 3: Create trading session
   logSection('Step 3: Create App Session');
@@ -220,6 +227,10 @@ async function runDemo(): Promise<void> {
   log('   capability integrated with ORION\'s AI rebalancing.');
   log('   The agent can make unlimited micro-adjustments');
   log('   without incurring gas costs!\n');
+
+  // Clean up
+  clearnode.disconnect();
+  process.exit(0);
 }
 
 /**

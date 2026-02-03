@@ -1,8 +1,17 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { privateKeyToAccount } from 'viem/accounts';
-import { keccak256, encodePacked, toHex } from 'viem';
+import { keccak256, encodePacked, toHex, type Hex, createWalletClient, http } from 'viem';
+import { sepolia } from 'viem/chains';
 import dotenv from 'dotenv';
+import {
+  createAuthRequestMessage,
+  createAuthVerifyMessage,
+  createEIP712AuthMessageSigner,
+  createTransferMessage,
+  createECDSAMessageSigner,
+  parseRPCResponse,
+} from '@erc7824/nitrolite';
 
 dotenv.config({ path: '../.env' });
 
@@ -21,6 +30,7 @@ export class ClearNodeClient extends EventEmitter {
   private messageId: number = 0;
   private pendingRequests: Map<number, { resolve: Function; reject: Function }> = new Map();
   private sessionId: string | null = null;
+  private manualDisconnect: boolean = false;
 
   // Trade statistics
   private tradeCount: number = 0;
@@ -130,6 +140,9 @@ export class ClearNodeClient extends EventEmitter {
    * Attempt to reconnect on disconnect
    */
   private attemptReconnect(): void {
+    if (this.manualDisconnect) {
+      return; // Don't reconnect if manually disconnected
+    }
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       console.log(`🔄 Reconnecting... (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
@@ -168,17 +181,94 @@ export class ClearNodeClient extends EventEmitter {
   }
 
   /**
-   * Authenticate with ClearNode
+   * Authenticate with ClearNode using Nitrolite RPC protocol with EIP-712 signatures
    */
   async authenticate(): Promise<any> {
-    const timestamp = Date.now();
-    const message = `Authenticate to ClearNode: ${timestamp}`;
-    const signature = await this.account.signMessage({ message });
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
 
-    return this.sendRequest('authenticate', {
-      address: this.account.address,
-      timestamp,
-      signature,
+    // Auth request parameters
+    const expiresAt = Math.floor(Date.now() / 1000) + 86400; // 24 hours from now
+    const authParams = {
+      participant: this.account.address,
+      session_key: this.account.address, // Using same key for simplicity
+      application: 'ORION',
+      scope: 'console',
+      expires_at: expiresAt.toString(),
+      allowances: [],
+    };
+
+    // Step 1: Send auth_request
+    const authRequest = await createAuthRequestMessage(authParams);
+
+    return new Promise((resolve, reject) => {
+      const authTimeout = setTimeout(() => {
+        reject(new Error('Authentication timeout'));
+      }, 15000);
+
+      // Handler for auth challenge response
+      const handleAuthResponse = async (data: Buffer) => {
+        try {
+          const rawMessage = data.toString();
+          const message = JSON.parse(rawMessage);
+          
+          // Response format: { res: [requestId, methodName, data, timestamp], sig: [...] }
+          // Check if this is an auth_challenge response
+          if (message.res && message.res[1] === 'auth_challenge') {
+            const challengeData = message.res[2];
+            const challenge = challengeData.challenge_message;
+            console.log('🔑 Received challenge, creating EIP-712 signature...');
+            
+            // Create wallet client for EIP-712 signing
+            const walletClient = createWalletClient({
+              account: this.account,
+              chain: sepolia,
+              transport: http(),
+            });
+
+            // Create EIP-712 message signer
+            const eip712Signer = createEIP712AuthMessageSigner(
+              walletClient,
+              {
+                scope: authParams.scope,
+                application: authParams.application,
+                participant: authParams.participant,
+                expires_at: authParams.expires_at,
+                allowances: authParams.allowances,
+              },
+              {
+                name: 'ORION',
+              }
+            );
+
+            // Create and send auth_verify with EIP-712 signature
+            const authVerify = await createAuthVerifyMessage(eip712Signer, message);
+            this.ws!.send(authVerify);
+          }
+          
+          // Check if this is auth success
+          if (message.res && (message.res[1] === 'auth_verify' || message.res[1] === 'ok')) {
+            console.log('✅ Authentication successful!');
+            clearTimeout(authTimeout);
+            this.ws!.off('message', handleAuthResponse);
+            resolve(message.res[2]);
+          }
+          
+          // Check for error
+          if (message.err) {
+            console.log('❌ Auth error:', message.err);
+            clearTimeout(authTimeout);
+            this.ws!.off('message', handleAuthResponse);
+            reject(new Error(message.err[1] || message.err.error || 'Authentication failed'));
+          }
+        } catch (error) {
+          console.error('Auth handler error:', error);
+        }
+      };
+
+      this.ws!.on('message', handleAuthResponse);
+      this.ws!.send(authRequest);
     });
   }
 
@@ -373,6 +463,7 @@ export class ClearNodeClient extends EventEmitter {
    * Disconnect from ClearNode
    */
   disconnect(): void {
+    this.manualDisconnect = true;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
