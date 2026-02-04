@@ -189,13 +189,13 @@ export class ClearNodeClient extends EventEmitter {
     }
 
     // Auth request parameters
-    const expiresAt = Math.floor(Date.now() / 1000) + 86400; // 24 hours from now
+    const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 86400); // 24 hours from now
     const authParams = {
-      participant: this.account.address,
+      address: this.account.address,
       session_key: this.account.address, // Using same key for simplicity
       application: 'ORION',
       scope: 'console',
-      expires_at: expiresAt.toString(),
+      expires_at: expiresAt,
       allowances: [],
     };
 
@@ -232,8 +232,7 @@ export class ClearNodeClient extends EventEmitter {
               walletClient,
               {
                 scope: authParams.scope,
-                application: authParams.application,
-                participant: authParams.participant,
+                session_key: authParams.session_key,
                 expires_at: authParams.expires_at,
                 allowances: authParams.allowances,
               },
@@ -242,8 +241,14 @@ export class ClearNodeClient extends EventEmitter {
               }
             );
 
+            // Transform raw message to SDK-expected format (camelCase params)
+            const parsedChallenge = {
+              params: {
+                challengeMessage: challenge, // SDK expects camelCase
+              },
+            };
             // Create and send auth_verify with EIP-712 signature
-            const authVerify = await createAuthVerifyMessage(eip712Signer, message);
+            const authVerify = await createAuthVerifyMessage(eip712Signer, parsedChallenge);
             this.ws!.send(authVerify);
           }
           
