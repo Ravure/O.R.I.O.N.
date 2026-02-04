@@ -1,0 +1,739 @@
+import WebSocket from 'ws';
+import { EventEmitter } from 'events';
+import { privateKeyToAccount } from 'viem/accounts';
+import { keccak256, encodePacked, toHex, type Hex, createWalletClient, http } from 'viem';
+import { sepolia } from 'viem/chains';
+import {
+  createAuthRequestMessage,
+  createAuthVerifyMessage,
+  createEIP712AuthMessageSigner,
+  createTransferMessage,
+  createECDSAMessageSigner,
+  createGetLedgerBalancesMessage,
+  parseAnyRPCResponse,
+} from '@erc7824/nitrolite';
+import { withRetry, TRADE_RETRY_CONFIG, WEBSOCKET_RETRY_CONFIG } from '../utils/retry.js';
+
+/**
+ * ClearNode WebSocket Client for Yellow Network
+ * Enables zero-fee off-chain trading via state channels
+ */
+export class ClearNodeClient extends EventEmitter {
+  private ws: WebSocket | null = null;
+  private privateKey: string;
+  private account: ReturnType<typeof privateKeyToAccount>;
+  private endpoint: string;
+  private isConnected: boolean = false;
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 5;
+  private messageId: number = 0;
+  private pendingRequests: Map<number, { resolve: Function; reject: Function }> = new Map();
+  private sessionId: string | null = null;
+  private manualDisconnect: boolean = false;
+  private connectingPromise: Promise<void> | null = null;
+
+  // Heartbeat / keepalive
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private pongTimeout: NodeJS.Timeout | null = null;
+  private lastPongAt: number = 0;
+  private readonly heartbeatIntervalMs = 20_000;
+  private readonly heartbeatTimeoutMs = 10_000;
+
+  // Trade statistics
+  private tradeCount: number = 0;
+  private totalVolume: number = 0;
+  private gasSaved: number = 0;
+
+  constructor(privateKey?: string, endpoint?: string) {
+    super();
+
+    this.privateKey = privateKey || process.env.AGENT_PRIVATE_KEY || '';
+    this.endpoint = endpoint || process.env.YELLOW_NETWORK_ENDPOINT || 'wss://clearnet-sandbox.yellow.com/ws';
+
+    if (!this.privateKey) {
+      throw new Error('AGENT_PRIVATE_KEY not found');
+    }
+
+    this.account = privateKeyToAccount(this.privateKey as `0x${string}`);
+  }
+
+  /**
+   * Connect to ClearNode WebSocket with retry
+   */
+  async connect(): Promise<void> {
+    if (this.isConnected) return;
+    if (this.connectingPromise) return this.connectingPromise;
+
+    // If the caller is explicitly asking to connect again, it should re-enable reconnects.
+    this.manualDisconnect = false;
+
+    this.connectingPromise = withRetry(
+      () => this._connect(),
+      {
+        ...WEBSOCKET_RETRY_CONFIG,
+        onRetry: (error, attempt, delay) => {
+          console.log(
+            `🔄 Connection retry ${attempt}: ${error instanceof Error ? error.message : 'Unknown error'}`
+          );
+          console.log(`   Waiting ${Math.round(delay)}ms before next attempt...`);
+        },
+      }
+    ).finally(() => {
+      this.connectingPromise = null;
+    });
+
+    return this.connectingPromise;
+  }
+
+  /**
+   * Internal connection method (called by retry wrapper)
+   */
+  private _connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // Ensure we don't keep stale sockets/handlers around.
+      this.cleanupSocket('reconnect');
+
+      console.log(`🔌 Connecting to ClearNode: ${this.endpoint}`);
+
+      this.ws = new WebSocket(this.endpoint);
+
+      this.ws.on('open', () => {
+        console.log('✅ Connected to ClearNode');
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+        this.lastPongAt = Date.now();
+        this.startHeartbeat();
+        this.emit('connected');
+        resolve();
+      });
+
+      this.ws.on('message', (data: Buffer) => {
+        this.handleMessage(data.toString());
+      });
+
+      this.ws.on('pong', () => {
+        this.lastPongAt = Date.now();
+        if (this.pongTimeout) {
+          clearTimeout(this.pongTimeout);
+          this.pongTimeout = null;
+        }
+      });
+
+      this.ws.on('close', (code, reason) => {
+        const reasonText = reason?.toString?.() || '';
+        console.log(`🔴 ClearNode connection closed${code ? ` (code ${code})` : ''}${reasonText ? `: ${reasonText}` : ''}`);
+        this.isConnected = false;
+        this.stopHeartbeat();
+        this.failPendingRequests(new Error('ClearNode disconnected'));
+        this.emit('disconnected');
+        this.attemptReconnect();
+      });
+
+      this.ws.on('error', (error) => {
+        console.error('❌ ClearNode WebSocket error:', error.message);
+        this.emit('error', error);
+        if (!this.isConnected) {
+          reject(error);
+        }
+      });
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        if (!this.isConnected) {
+          reject(new Error('Connection timeout'));
+        }
+      }, 10000);
+    });
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    if (!this.ws) return;
+
+    this.heartbeatInterval = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+      try {
+        this.ws.ping();
+
+        // If we don't get a pong in time, terminate the socket so reconnect kicks in.
+        if (this.pongTimeout) clearTimeout(this.pongTimeout);
+        this.pongTimeout = setTimeout(() => {
+          const since = Date.now() - this.lastPongAt;
+          console.warn(`⚠️ Heartbeat timeout (${Math.round(since / 1000)}s since last pong). Terminating socket...`);
+          try {
+            this.ws?.terminate();
+          } catch {
+            // ignore
+          }
+        }, this.heartbeatTimeoutMs);
+      } catch (e) {
+        // If ping fails, let reconnect path handle it.
+      }
+    }, this.heartbeatIntervalMs);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
+    }
+  }
+
+  private failPendingRequests(error: Error): void {
+    for (const [, pending] of this.pendingRequests.entries()) {
+      try {
+        pending.reject(error);
+      } catch {
+        // ignore
+      }
+    }
+    this.pendingRequests.clear();
+  }
+
+  private cleanupSocket(_reason: 'reconnect' | 'manual' = 'manual'): void {
+    this.stopHeartbeat();
+    if (this.ws) {
+      try {
+        this.ws.removeAllListeners();
+      } catch {
+        // ignore
+      }
+      try {
+        // terminate is safer than close for stuck sockets
+        this.ws.terminate();
+      } catch {
+        try {
+          this.ws.close();
+        } catch {
+          // ignore
+        }
+      }
+      this.ws = null;
+    }
+    this.isConnected = false;
+  }
+
+  /**
+   * Handle incoming WebSocket messages
+   */
+  private handleMessage(data: string): void {
+    try {
+      const message = JSON.parse(data);
+
+      // Handle response to pending request
+      if (message.id && this.pendingRequests.has(message.id)) {
+        const { resolve, reject } = this.pendingRequests.get(message.id)!;
+        this.pendingRequests.delete(message.id);
+
+        if (message.error) {
+          reject(new Error(message.error.message || 'Unknown error'));
+        } else {
+          resolve(message.result);
+        }
+      }
+
+      // Handle events
+      if (message.type === 'trade_confirmed') {
+        this.tradeCount++;
+        this.totalVolume += parseFloat(message.amount || 0);
+        this.gasSaved += 3.5; // Average gas cost saved per trade
+        this.emit('trade_confirmed', message);
+      }
+
+      if (message.type === 'session_created') {
+        this.sessionId = message.sessionId;
+        this.emit('session_created', message);
+      }
+
+      if (message.type === 'payment_received') {
+        this.emit('payment_received', message);
+      }
+
+    } catch (error) {
+      console.error('Failed to parse message:', error);
+    }
+  }
+
+  /**
+   * Attempt to reconnect on disconnect
+   */
+  private attemptReconnect(): void {
+    if (this.manualDisconnect) {
+      return; // Don't reconnect if manually disconnected
+    }
+    if (this.connectingPromise) {
+      return; // Reconnect already in progress
+    }
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      console.log(`🔄 Reconnecting... (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+      const baseDelay = 1000 * Math.pow(2, this.reconnectAttempts - 1);
+      const jitter = Math.floor(Math.random() * 300);
+      const delay = Math.min(30_000, baseDelay + jitter);
+      setTimeout(() => void this.connect(), delay);
+    }
+  }
+
+  /**
+   * Send a JSON-RPC request
+   */
+  private async sendRequest(method: string, params: any): Promise<any> {
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
+
+    const id = ++this.messageId;
+    const request = {
+      jsonrpc: '2.0',
+      id,
+      method,
+      params,
+    };
+
+    return new Promise((resolve, reject) => {
+      this.pendingRequests.set(id, { resolve, reject });
+      this.ws!.send(JSON.stringify(request));
+
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        if (this.pendingRequests.has(id)) {
+          this.pendingRequests.delete(id);
+          reject(new Error('Request timeout'));
+        }
+      }, 30000);
+    });
+  }
+
+  /**
+   * Authenticate with ClearNode using Nitrolite RPC protocol with EIP-712 signatures
+   */
+  async authenticate(): Promise<any> {
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
+
+    // Auth request parameters
+    const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 86400); // 24 hours from now
+    const authParams = {
+      address: this.account.address,
+      session_key: this.account.address, // Using same key for simplicity
+      application: 'ORION',
+      scope: 'console',
+      expires_at: expiresAt,
+      allowances: [],
+    };
+
+    // Step 1: Send auth_request
+    const authRequest = await createAuthRequestMessage(authParams);
+
+    return new Promise((resolve, reject) => {
+      const authTimeout = setTimeout(() => {
+        reject(new Error('Authentication timeout'));
+      }, 15000);
+
+      // Handler for auth challenge response
+      const handleAuthResponse = async (data: Buffer) => {
+        try {
+          const rawMessage = data.toString();
+          const message = JSON.parse(rawMessage);
+          
+          // Response format: { res: [requestId, methodName, data, timestamp], sig: [...] }
+          // Check if this is an auth_challenge response
+          if (message.res && message.res[1] === 'auth_challenge') {
+            const challengeData = message.res[2];
+            const challenge = challengeData.challenge_message;
+            console.log('🔑 Received challenge, creating EIP-712 signature...');
+            
+            // Create wallet client for EIP-712 signing
+            const walletClient = createWalletClient({
+              account: this.account,
+              chain: sepolia,
+              transport: http(),
+            });
+
+            // Create EIP-712 message signer
+            const eip712Signer = createEIP712AuthMessageSigner(
+              walletClient,
+              {
+                scope: authParams.scope,
+                session_key: authParams.session_key,
+                expires_at: authParams.expires_at,
+                allowances: authParams.allowances,
+              },
+              {
+                name: 'ORION',
+              }
+            );
+
+            // Transform raw message to SDK-expected format (camelCase params)
+            const parsedChallenge = {
+              method: 'auth_challenge' as any,
+              params: {
+                challengeMessage: challenge, // SDK expects camelCase
+              },
+            };
+            // Create and send auth_verify with EIP-712 signature
+            const authVerify = await createAuthVerifyMessage(eip712Signer, parsedChallenge);
+            this.ws!.send(authVerify);
+          }
+          
+          // Check if this is auth success
+          if (message.res && (message.res[1] === 'auth_verify' || message.res[1] === 'ok')) {
+            console.log('✅ Authentication successful!');
+            clearTimeout(authTimeout);
+            this.ws!.off('message', handleAuthResponse);
+            resolve(message.res[2]);
+          }
+          
+          // Check for error
+          if (message.err) {
+            console.log('❌ Auth error:', message.err);
+            clearTimeout(authTimeout);
+            this.ws!.off('message', handleAuthResponse);
+            reject(new Error(message.err[1] || message.err.error || 'Authentication failed'));
+          }
+        } catch (error) {
+          console.error('Auth handler error:', error);
+        }
+      };
+
+      this.ws!.on('message', handleAuthResponse);
+      this.ws!.send(authRequest);
+    });
+  }
+
+  /**
+   * Get ledger balances from Yellow Network
+   */
+  async getLedgerBalances(): Promise<any> {
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
+
+    const messageSigner = createECDSAMessageSigner(this.privateKey as Hex);
+    const balanceMessage = await createGetLedgerBalancesMessage(messageSigner, this.account.address);
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Balance request timeout')), 15000);
+
+      const handler = (data: Buffer) => {
+        const message = JSON.parse(data.toString());
+
+        if (message.res?.[1] === 'get_ledger_balances') {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          const payload = message.res[2];
+          // Normalize response shape across SDK/server versions.
+          // Observed shapes:
+          // - { balances: [{asset, amount}, ...] }
+          // - { ledger_balances: [{asset, amount}, ...] }
+          if (payload?.ledger_balances && !payload?.balances) {
+            resolve({ ...payload, balances: payload.ledger_balances });
+          } else {
+            resolve(payload);
+          }
+        }
+
+        if (message.err) {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          reject(new Error(message.err[1] || 'Failed to get balances'));
+        }
+      };
+
+      this.ws!.on('message', handler);
+      this.ws!.send(balanceMessage);
+    });
+  }
+
+  /**
+   * Execute a REAL transfer on Yellow Network (off-chain, zero gas)
+   * Includes exponential backoff retry for transient failures
+   */
+  async transfer(params: {
+    destination: string;
+    asset: string;
+    amount: string;
+  }): Promise<any> {
+    return withRetry(
+      () => this._executeTransfer(params),
+      {
+        ...TRADE_RETRY_CONFIG,
+        onRetry: (error, attempt, delay) => {
+          console.log(`⚠️ Transfer retry ${attempt}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          console.log(`   Waiting ${Math.round(delay)}ms before next attempt...`);
+        },
+      }
+    );
+  }
+
+  /**
+   * Internal transfer execution (called by retry wrapper)
+   */
+  private async _executeTransfer(params: {
+    destination: string;
+    asset: string;
+    amount: string;
+  }): Promise<any> {
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
+
+    const messageSigner = createECDSAMessageSigner(this.privateKey as Hex);
+    const transferParams = {
+      destination: params.destination as `0x${string}`,
+      allocations: [
+        { asset: params.asset, amount: params.amount }
+      ],
+    };
+
+    const transferMessage = await createTransferMessage(messageSigner, transferParams);
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Transfer timeout')), 30000);
+
+      const handler = (data: Buffer) => {
+        const message = JSON.parse(data.toString());
+
+        if (message.res?.[1] === 'transfer') {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          
+          // Update stats
+          const tx = message.res[2].transactions?.[0];
+          if (tx) {
+            this.tradeCount++;
+            this.totalVolume += parseFloat(tx.amount) / 1000000; // Convert from 6 decimals
+            this.gasSaved += 11.25; // ~$11.25 saved per trade (150k gas * 30 gwei * $2500 ETH)
+          }
+          
+          resolve(message.res[2]);
+        }
+
+        if (message.err || message.res?.[1] === 'error') {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          reject(new Error(message.err?.[1] || message.res?.[2]?.error || 'Transfer failed'));
+        }
+      };
+
+      this.ws!.on('message', handler);
+      this.ws!.send(transferMessage);
+    });
+  }
+
+  /**
+   * Create an app session for trading
+   * ERC-7824 compliant session message
+   */
+  async createAppSession(params: {
+    appName: string;
+    duration: number;
+    maxAmount: string;
+    tokenAddress?: string;
+  }): Promise<any> {
+    const sessionMessage = {
+      app: params.appName,
+      participant: this.account.address,
+      duration: params.duration,
+      maxAmount: params.maxAmount,
+      token: params.tokenAddress || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC
+      timestamp: Date.now(),
+    };
+
+    // Sign the session message
+    const messageHash = keccak256(
+      encodePacked(
+        ['string', 'address', 'uint256', 'string', 'address', 'uint256'],
+        [
+          sessionMessage.app,
+          sessionMessage.participant as `0x${string}`,
+          BigInt(sessionMessage.duration),
+          sessionMessage.maxAmount,
+          sessionMessage.token as `0x${string}`,
+          BigInt(sessionMessage.timestamp),
+        ]
+      )
+    );
+
+    const signature = await this.account.signMessage({
+      message: { raw: messageHash },
+    });
+
+    return this.sendRequest('createAppSession', {
+      ...sessionMessage,
+      signature,
+    });
+  }
+
+  /**
+   * Send a payment (off-chain trade)
+   * This is the core zero-fee trading function
+   */
+  async sendPayment(params: {
+    recipient: string;
+    amount: string;
+    token?: string;
+    memo?: string;
+  }): Promise<any> {
+    if (!this.sessionId) {
+      throw new Error('No active session. Call createAppSession first.');
+    }
+
+    const payment = {
+      sessionId: this.sessionId,
+      from: this.account.address,
+      to: params.recipient,
+      amount: params.amount,
+      token: params.token || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      memo: params.memo || '',
+      timestamp: Date.now(),
+      nonce: this.tradeCount + 1,
+    };
+
+    // Sign the payment
+    const paymentHash = keccak256(
+      encodePacked(
+        ['string', 'address', 'address', 'string', 'address', 'uint256', 'uint256'],
+        [
+          payment.sessionId,
+          payment.from as `0x${string}`,
+          payment.to as `0x${string}`,
+          payment.amount,
+          payment.token as `0x${string}`,
+          BigInt(payment.timestamp),
+          BigInt(payment.nonce),
+        ]
+      )
+    );
+
+    const signature = await this.account.signMessage({
+      message: { raw: paymentHash },
+    });
+
+    const result = await this.sendRequest('sendPayment', {
+      ...payment,
+      signature,
+    });
+
+    // Update stats
+    this.tradeCount++;
+    this.totalVolume += parseFloat(params.amount);
+    this.gasSaved += 3.5;
+
+    return result;
+  }
+
+  /**
+   * Execute a swap (trade one token for another)
+   */
+  async swap(params: {
+    fromToken: string;
+    toToken: string;
+    amount: string;
+    minReceive?: string;
+  }): Promise<any> {
+    return this.sendRequest('swap', {
+      sessionId: this.sessionId,
+      from: this.account.address,
+      fromToken: params.fromToken,
+      toToken: params.toToken,
+      amount: params.amount,
+      minReceive: params.minReceive || '0',
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Get current session balance
+   */
+  async getSessionBalance(): Promise<any> {
+    if (!this.sessionId) {
+      throw new Error('No active session');
+    }
+    return this.sendRequest('getSessionBalance', {
+      sessionId: this.sessionId,
+    });
+  }
+
+  /**
+   * Close the session and settle on-chain
+   */
+  async closeSession(): Promise<any> {
+    if (!this.sessionId) {
+      throw new Error('No active session');
+    }
+
+    const result = await this.sendRequest('closeSession', {
+      sessionId: this.sessionId,
+    });
+
+    this.sessionId = null;
+    return result;
+  }
+
+  /**
+   * Get trading statistics
+   */
+  getStats(): {
+    tradeCount: number;
+    totalVolume: number;
+    gasSaved: number;
+    gasSavedUSD: number;
+    sessionId: string | null;
+    isConnected: boolean;
+  } {
+    return {
+      tradeCount: this.tradeCount,
+      totalVolume: this.totalVolume,
+      gasSaved: this.gasSaved,
+      gasSavedUSD: this.gasSaved * 2.5, // Assume $2.5 avg gas price
+      sessionId: this.sessionId,
+      isConnected: this.isConnected,
+    };
+  }
+
+  /**
+   * Reset statistics
+   */
+  resetStats(): void {
+    this.tradeCount = 0;
+    this.totalVolume = 0;
+    this.gasSaved = 0;
+  }
+
+  /**
+   * Get account address
+   */
+  getAddress(): string {
+    return this.account.address;
+  }
+
+  /**
+   * Disconnect from ClearNode
+   */
+  disconnect(): void {
+    this.manualDisconnect = true;
+    this.cleanupSocket('manual');
+    this.failPendingRequests(new Error('ClearNode disconnected (manual)'));
+    this.isConnected = false;
+    this.sessionId = null;
+  }
+}
+
+/**
+ * Token addresses on Sepolia testnet
+ */
+export const SEPOLIA_TOKENS = {
+  USDC: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', // Circle USDC on Sepolia
+  USDT: '0x7169D38820dfd117C3FA1f22a697dBA58d90BA06',
+  DAI: '0x68194a729C2450ad26072b3D33ADaCbcef39D574',
+  WETH: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14',
+};
+
+export default ClearNodeClient;
