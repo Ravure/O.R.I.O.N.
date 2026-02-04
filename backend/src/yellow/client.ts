@@ -3,13 +3,16 @@ import { createPublicClient, createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   getNetworkConfig,
   DEFAULT_CHALLENGE_DURATION,
   CLEARNODE_WEBSOCKET_URL,
 } from './config.js';
 
-dotenv.config({ path: '../.env' });
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 /**
  * Yellow Network client for zero-fee state channel trading

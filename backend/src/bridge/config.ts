@@ -75,7 +75,7 @@ export const BRIDGE_OPTIONS = {
 
 export const AUTO_BRIDGE_CONFIG = {
   // Minimum APY difference to trigger bridge (2%)
-  minApyDifferential: 0.02,
+  minApyDifferential: 2,
   
   // Maximum exposure to single chain (50%)
   maxChainExposure: 0.50,

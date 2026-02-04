@@ -15,9 +15,9 @@ import {
 } from './types.js';
 import { ClearNodeClient } from '../yellow/clearnode.js';
 import { LiFiBridgeClient } from '../bridge/lifi.js';
-import { waitForBridgeCompletion } from '../bridge/monitor.js';
 import { PortfolioTracker } from './portfolioTracker.js';
 import { YieldExecutionEngine } from '../execution/yieldExecution.js';
+import { getUsdcAddress } from '../bridge/config.js';
 
 export class TradeExecutor {
   private config: AgentConfig;
@@ -144,7 +144,7 @@ export class TradeExecutor {
             toChain: opportunity.toPool.chainId,
             fromProtocol: opportunity.fromPosition?.protocol,
             toProtocol: opportunity.toPool.protocol,
-            amount: opportunity.amount,
+            amount: oppToExecute.amount,
             cost: execution.actualCost,
           });
 
@@ -363,14 +363,25 @@ export class TradeExecutor {
   ): Promise<TradeExecution> {
     console.log(`   🌉 Executing bridge: ${execution.fromChain} → ${execution.toChain}`);
     
+    const fromToken = getUsdcAddress(execution.fromChain);
+    const toToken = getUsdcAddress(execution.toChain);
+    if (!fromToken || !toToken) {
+      throw new Error(`Missing USDC mapping for bridge (${execution.fromChain} → ${execution.toChain})`);
+    }
+
+    const userAddress = this.yellowClient?.getAddress();
+    if (!userAddress) {
+      throw new Error('Yellow Network address not available for bridge quote');
+    }
+
     // Get bridge quote
-    const quote = await this.bridgeClient.getBridgeQuote({
-      fromChain: execution.fromChain,
-      toChain: execution.toChain,
-      fromToken: 'USDC', // Assuming USDC
-      toToken: 'USDC',
+    const quote = await this.bridgeClient.getQuote({
+      fromChainId: execution.fromChain,
+      toChainId: execution.toChain,
+      fromToken,
+      toToken,
       amount: Math.floor(opportunity.amount * 1_000_000).toString(), // 6 decimals
-      userAddress: this.yellowClient?.getAddress() || '',
+      userAddress,
     });
 
     if (!quote) {
@@ -378,13 +389,16 @@ export class TradeExecutor {
     }
 
     execution.status = 'confirming';
-    console.log(`   📊 Bridge quote: ${quote.toolDetails?.name}, fee: $${quote.gasCostUSD}`);
+    console.log(`   📊 Bridge quote: ${quote.bridgeName}, fee: $${quote.estimatedGas}`);
 
     // For now, we just record the quote - actual execution requires real funds
     // In production, you would use bridgeClient.executeBridge() with a signer
     
-    execution.actualCost = parseFloat(quote.gasCostUSD || '0');
-    execution.actualReceived = opportunity.amount - execution.actualCost;
+    execution.actualCost = parseFloat(quote.estimatedGas || '0');
+    const quotedReceived = Number(quote.toAmount) / 1_000_000;
+    execution.actualReceived = Number.isFinite(quotedReceived)
+      ? quotedReceived
+      : opportunity.amount - execution.actualCost;
     
     // Simulate bridge completion for demo
     console.log(`   ⏳ Bridge initiated (would take ~${Math.round((quote.estimatedTime || 60) / 60)} minutes)`);

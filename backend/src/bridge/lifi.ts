@@ -3,7 +3,7 @@
  * Wrapper around the LI.FI SDK for cross-chain bridging
  */
 
-import { createConfig, getQuote, getStatus, getRoutes } from '@lifi/sdk';
+import { createConfig, getStatus, getRoutes } from '@lifi/sdk';
 import type { Route, RoutesRequest, GetStatusRequest } from '@lifi/sdk';
 import { ethers } from 'ethers';
 import { 
@@ -69,6 +69,13 @@ export class LiFiBridgeClient {
         params
       );
     }
+  }
+
+  /**
+   * Backwards-compatible alias
+   */
+  async getBridgeQuote(params: BridgeQuoteRequest): Promise<BridgeQuote> {
+    return this.getQuote(params);
   }
 
   /**

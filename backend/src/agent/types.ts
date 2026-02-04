@@ -70,6 +70,7 @@ export interface RebalanceOpportunity {
     chainName: string;
     protocol: string;
     pool: string;
+    poolAddress?: string;
     symbol: string;
     apy: number;
     tvl: number;
@@ -230,6 +231,9 @@ export interface AgentConfig {
   
   // Notifications
   notifications: NotificationConfig;
+
+  // P&L / Accounting
+  pnlTimeScale: number; // 1 = real time, >1 = accelerated accrual (demo)
 }
 
 // ============ Events ============

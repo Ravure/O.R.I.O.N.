@@ -99,6 +99,9 @@ export async function fetchUSDCPools(
       // Must have valid APY
       if (pool.apy === null || pool.apy === undefined) return false;
       if (pool.apy < (config.minApy ?? 0)) return false;
+      if (config.maxApy !== undefined && pool.apy > config.maxApy) return false;
+
+      if (config.stablecoinOnly && !pool.stablecoin) return false;
       
       // Must meet TVL threshold
       if (pool.tvlUsd < (config.minTvlUsd ?? 0)) return false;

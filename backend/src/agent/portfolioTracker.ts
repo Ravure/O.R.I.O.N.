@@ -180,11 +180,9 @@ export class PortfolioTracker {
       lastUpdated: Date.now(),
     };
     
-    // Calculate unrealized P&L based on APY difference over time
-    const daysHeld = (updated.lastUpdated - updated.entryTimestamp) / (1000 * 60 * 60 * 24);
-    const expectedReturn = updated.balance * (updated.entryApy / 100 / 365) * daysHeld;
-    const actualReturn = updated.balance * (updated.currentApy / 100 / 365) * daysHeld;
-    updated.unrealizedPnl = actualReturn - expectedReturn + (updates.unrealizedPnl || 0);
+    if (updates.unrealizedPnl !== undefined) {
+      updated.unrealizedPnl = updates.unrealizedPnl;
+    }
     
     this.positions.set(id, updated);
     this.savePosition(updated);
@@ -258,6 +256,31 @@ export class PortfolioTracker {
           this.updatePosition(params.positionId, { balance: newBalance });
         }
       }
+    }
+  }
+
+  /**
+   * Accrue yield on all positions since last update.
+   * Uses current APY as the accrual rate for the elapsed period.
+   */
+  accrueYield(now: number = Date.now(), timeScale: number = 1): void {
+    const msPerDay = 1000 * 60 * 60 * 24;
+    for (const [id, position] of this.positions.entries()) {
+      if (position.balance <= 0 || position.currentApy <= 0) continue;
+
+      const elapsedDays = (now - position.lastUpdated) / msPerDay;
+      if (elapsedDays <= 0) continue;
+
+      const scaledElapsedDays = elapsedDays * timeScale;
+      const accrued = position.balance * (position.currentApy / 100 / 365) * scaledElapsedDays;
+      const updated: Position = {
+        ...position,
+        unrealizedPnl: position.unrealizedPnl + accrued,
+        lastUpdated: now,
+      };
+
+      this.positions.set(id, updated);
+      this.savePosition(updated);
     }
   }
 

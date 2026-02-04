@@ -39,7 +39,8 @@ export class DecisionEngine {
    */
   analyze(
     portfolio: Portfolio,
-    yields: YieldPool[]
+    yields: YieldPool[],
+    options: { idleBalanceOverride?: number } = {}
   ): DecisionResult {
     const now = Date.now();
     const riskProfile = getRiskProfile(this.config.riskProfile);
@@ -57,7 +58,12 @@ export class DecisionEngine {
     }
     
     // Find opportunities
-    const opportunities = this.findOpportunities(portfolio, eligiblePools, riskProfile);
+    const opportunities = this.findOpportunities(
+      portfolio,
+      eligiblePools,
+      riskProfile,
+      options.idleBalanceOverride
+    );
     
     if (opportunities.length === 0) {
       return {
@@ -137,7 +143,8 @@ export class DecisionEngine {
       if (pool.riskScore && pool.riskScore > riskProfile.maxRiskScore) return false;
       
       // Protocol check
-      if (!isProtocolAllowed(pool.project, this.config.riskProfile)) return false;
+      const protocolName = pool.protocol || pool.project;
+      if (!isProtocolAllowed(protocolName, this.config.riskProfile)) return false;
       
       return true;
     });
@@ -149,9 +156,13 @@ export class DecisionEngine {
   private findOpportunities(
     portfolio: Portfolio,
     pools: YieldPool[],
-    riskProfile: typeof RISK_PROFILES[RiskProfile]
+    riskProfile: typeof RISK_PROFILES[RiskProfile],
+    idleBalanceOverride?: number
   ): RebalanceOpportunity[] {
     const opportunities: RebalanceOpportunity[] = [];
+    const totalValue = portfolio.totalValue || 0;
+    const maxSingleTradeUsd = this.getMaxSingleTradeUsd(totalValue);
+    const exposures = this.getEffectiveExposures(portfolio);
     
     // Group pools by chain for easier lookup
     const poolsByChain = new Map<number, YieldPool[]>();
@@ -173,22 +184,64 @@ export class DecisionEngine {
     // Overall best pool
     const allPools = [...pools].sort((a, b) => b.apy - a.apy);
     const bestOverall = allPools[0];
+
+    // Deploy idle funds (Yellow balance or other cash-like positions)
+    const computedIdle = portfolio.positions
+      .filter(p => this.isIdlePosition(p))
+      .reduce((sum, p) => sum + p.balance, 0);
+    const idleBalance = idleBalanceOverride ?? computedIdle;
+
+    if (idleBalance > 0 && bestOverall) {
+      const depositTarget = this.pickBestDepositPool(
+        allPools,
+        exposures.chainExposure,
+        exposures.protocolExposure,
+        totalValue
+      );
+
+      if (depositTarget) {
+        const amount = this.computeAllowedAmount({
+          desired: idleBalance,
+          maxSingleTradeUsd,
+          totalValue,
+          currentChainExposure: exposures.chainExposure.get(depositTarget.chainId) || 0,
+          currentProtocolExposure: exposures.protocolExposure.get(depositTarget.protocol.toLowerCase()) || 0,
+        });
+
+        if (amount > 0) {
+          opportunities.push(this.createOpportunity({
+            fromPosition: null,
+            toPool: depositTarget,
+            actionType: 'deposit',
+            apyGain: depositTarget.apy,
+            estimatedCost: 0,
+            amount,
+          }));
+        }
+      }
+    }
     
     // Check each existing position for improvement opportunities
     for (const position of portfolio.positions) {
+      if (this.isIdlePosition(position)) continue;
+
       // Same-chain rebalance (cheaper)
       const bestOnSameChain = bestByChain.get(position.chainId);
       if (bestOnSameChain && bestOnSameChain.apy > position.currentApy) {
         const apyGain = bestOnSameChain.apy - position.currentApy;
         
         if (apyGain >= this.config.minApyDifferential) {
-          opportunities.push(this.createOpportunity(
-            position,
-            bestOnSameChain,
-            'rebalance',
-            apyGain,
-            0.5 // Estimated $0.50 for same-chain swap
-          ));
+          const amount = Math.min(position.balance, maxSingleTradeUsd);
+          if (amount > 0) {
+            opportunities.push(this.createOpportunity({
+              fromPosition: position,
+              toPool: bestOnSameChain,
+              actionType: 'rebalance',
+              apyGain,
+              estimatedCost: this.config.preferYellowNetwork ? 0 : 0.5,
+              amount,
+            }));
+          }
         }
       }
       
@@ -199,15 +252,24 @@ export class DecisionEngine {
         
         if (apyGain >= minBridgeApyGain) {
           // Check chain exposure limit
-          const currentExposure = portfolio.chainExposure.get(bestOverall.chainId) || 0;
-          if (currentExposure + (position.balance / portfolio.totalValue) <= riskProfile.maxChainExposure) {
-            opportunities.push(this.createOpportunity(
-              position,
-              bestOverall,
-              'bridge',
+          const currentExposure = exposures.chainExposure.get(bestOverall.chainId) || 0;
+          const amount = this.computeAllowedAmount({
+            desired: position.balance,
+            maxSingleTradeUsd,
+            totalValue,
+            currentChainExposure: currentExposure,
+            currentProtocolExposure: exposures.protocolExposure.get(bestOverall.protocol.toLowerCase()) || 0,
+          });
+
+          if (amount > 0) {
+            opportunities.push(this.createOpportunity({
+              fromPosition: position,
+              toPool: bestOverall,
+              actionType: 'bridge',
               apyGain,
-              this.estimateBridgeCost(position.balance, position.chainId, bestOverall.chainId)
-            ));
+              estimatedCost: this.estimateBridgeCost(amount, position.chainId, bestOverall.chainId),
+              amount,
+            }));
           }
         }
       }
@@ -222,14 +284,15 @@ export class DecisionEngine {
   /**
    * Create a rebalance opportunity object
    */
-  private createOpportunity(
-    fromPosition: Position,
-    toPool: YieldPool,
-    actionType: ActionType,
-    apyGain: number,
-    estimatedCost: number
-  ): RebalanceOpportunity {
-    const amount = fromPosition.balance;
+  private createOpportunity(params: {
+    fromPosition: Position | null;
+    toPool: YieldPool;
+    actionType: ActionType;
+    apyGain: number;
+    estimatedCost: number;
+    amount: number;
+  }): RebalanceOpportunity {
+    const { fromPosition, toPool, actionType, apyGain, estimatedCost, amount } = params;
     const dailyBenefit = (amount * apyGain / 100) / 365;
     const netBenefit = dailyBenefit - (estimatedCost / 30); // Amortize cost over 30 days
     
@@ -262,8 +325,9 @@ export class DecisionEngine {
       toPool: {
         chainId: toPool.chainId,
         chainName,
-        protocol: toPool.project,
+        protocol: toPool.protocol,
         pool: toPool.pool,
+        poolAddress: toPool.poolAddress,
         symbol: toPool.symbol,
         apy: toPool.apy,
         tvl: toPool.tvlUsd,
@@ -284,11 +348,15 @@ export class DecisionEngine {
    * Generate human-readable reason for rebalance
    */
   private generateReason(
-    from: Position,
+    from: Position | null,
     to: YieldPool,
     apyGain: number,
     actionType: ActionType
   ): string {
+    if (!from || actionType === 'deposit') {
+      const chainName = SUPPORTED_CHAINS[to.chainId as SupportedChainId]?.name || `Chain ${to.chainId}`;
+      return `Deploy idle funds to ${to.project} (${chainName}) for ~${apyGain.toFixed(1)}% APY`;
+    }
     if (actionType === 'bridge') {
       return `Bridge from ${from.protocol} (${from.chainName}) to ${to.project} (${SUPPORTED_CHAINS[to.chainId as SupportedChainId]?.name}) for +${apyGain.toFixed(1)}% APY`;
     }
@@ -362,6 +430,82 @@ export class DecisionEngine {
     const toGas = gasEstimates[toChain] || 1;
     
     return bridgeFee + fromGas + toGas;
+  }
+
+  private isIdlePosition(position: Position): boolean {
+    return position.protocol === 'yellow-network' || position.pool === 'state-channel';
+  }
+
+  private getEffectiveExposures(portfolio: Portfolio): {
+    chainExposure: Map<number, number>;
+    protocolExposure: Map<string, number>;
+  } {
+    const chainExposure = new Map<number, number>();
+    const protocolExposure = new Map<string, number>();
+    const totalValue = portfolio.totalValue || 0;
+
+    if (totalValue <= 0) {
+      return { chainExposure, protocolExposure };
+    }
+
+    for (const position of portfolio.positions) {
+      if (this.isIdlePosition(position)) continue;
+      const pct = position.balance / totalValue;
+      chainExposure.set(position.chainId, (chainExposure.get(position.chainId) || 0) + pct);
+      const protoKey = position.protocol.toLowerCase();
+      protocolExposure.set(protoKey, (protocolExposure.get(protoKey) || 0) + pct);
+    }
+
+    return { chainExposure, protocolExposure };
+  }
+
+  private getMaxSingleTradeUsd(totalValue: number): number {
+    if (totalValue <= 0) return 0;
+    return totalValue * (this.config.maxSingleTradePercent / 100);
+  }
+
+  private computeAllowedAmount(params: {
+    desired: number;
+    maxSingleTradeUsd: number;
+    totalValue: number;
+    currentChainExposure: number;
+    currentProtocolExposure: number;
+  }): number {
+    const {
+      desired,
+      maxSingleTradeUsd,
+      totalValue,
+      currentChainExposure,
+      currentProtocolExposure,
+    } = params;
+
+    if (desired <= 0 || totalValue <= 0) return 0;
+
+    const maxChain = Math.max(0, this.config.maxChainExposure - currentChainExposure) * totalValue;
+    const maxProtocol = Math.max(0, this.config.maxProtocolExposure - currentProtocolExposure) * totalValue;
+
+    return Math.max(
+      0,
+      Math.min(desired, maxSingleTradeUsd, maxChain, maxProtocol)
+    );
+  }
+
+  private pickBestDepositPool(
+    pools: YieldPool[],
+    chainExposure: Map<number, number>,
+    protocolExposure: Map<string, number>,
+    totalValue: number
+  ): YieldPool | null {
+    for (const pool of pools) {
+      const currentChainExposure = chainExposure.get(pool.chainId) || 0;
+      const currentProtocolExposure = protocolExposure.get(pool.protocol.toLowerCase()) || 0;
+      const maxChain = Math.max(0, this.config.maxChainExposure - currentChainExposure) * totalValue;
+      const maxProtocol = Math.max(0, this.config.maxProtocolExposure - currentProtocolExposure) * totalValue;
+      if (maxChain > 0 && maxProtocol > 0) {
+        return pool;
+      }
+    }
+    return null;
   }
 
   /**

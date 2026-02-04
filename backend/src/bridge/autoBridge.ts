@@ -75,7 +75,7 @@ export class AutoBridger {
     const currentYield = yields[currentPosition.chainId]?.bestApy ?? 0;
     const currentChain = currentPosition.chain;
 
-    console.log(`[AutoBridge] Current position: ${getChainName(currentPosition.chainId)} @ ${(currentYield * 100).toFixed(2)}% APY`);
+    console.log(`[AutoBridge] Current position: ${getChainName(currentPosition.chainId)} @ ${currentYield.toFixed(2)}% APY`);
 
     // Find the best yield across all chains
     let bestChain: SupportedChain | null = null;
@@ -100,15 +100,15 @@ export class AutoBridger {
     // Check if the improvement exceeds threshold
     const yieldDiff = bestYield - currentYield;
     if (bestChain && yieldDiff > this.yieldThreshold) {
-      const improvement = (yieldDiff * 100).toFixed(2);
-      console.log(`[AutoBridge] Better opportunity: ${getChainName(bestChainId)} @ ${(bestYield * 100).toFixed(2)}% APY (+${improvement}%)`);
+      const improvement = yieldDiff.toFixed(2);
+      console.log(`[AutoBridge] Better opportunity: ${getChainName(bestChainId)} @ ${bestYield.toFixed(2)}% APY (+${improvement}%)`);
 
       return {
         type: 'YIELD_OPTIMIZATION',
         fromChain: currentChain,
         toChain: bestChain,
         amount: currentPosition.balance,
-        reason: `${improvement}% APY improvement (${(currentYield * 100).toFixed(2)}% → ${(bestYield * 100).toFixed(2)}%)`,
+        reason: `${improvement}% APY improvement (${currentYield.toFixed(2)}% → ${bestYield.toFixed(2)}%)`,
         expectedApyImprovement: yieldDiff,
       };
     }

@@ -62,10 +62,18 @@ ${colors.yellow}Options:${colors.reset}
   --risk=<profile>   Risk profile: conservative, balanced, aggressive
   --scan=<minutes>   Scan interval in minutes (default: 10)
   --analysis=<hours> Full analysis interval in hours (default: 6)
+  --minApy=<pct>     Minimum APY differential to act (default: 5)
+  --minNet=<usd>     Minimum net benefit per day (default: 10)
+  --maxChain=<pct>   Max chain exposure (0-1 or percent, default: 40%)
+  --maxProtocol=<pct> Max protocol exposure (0-1 or percent, default: 25%)
+  --maxTrade=<pct>   Max single trade size as % of portfolio (default: 25)
+  --pnlScale=<x>     P&L accrual time scale (1=real time, demo use 100+)
 
 ${colors.yellow}Examples:${colors.reset}
   npm run agent:start
   npm run agent:start -- --risk=aggressive
+  npm run agent:start -- --minApy=2 --minNet=0.5 --maxChain=60
+  npm run agent:start -- --pnlScale=100
   npm run agent:once
   npm run agent:demo
 `);
@@ -86,6 +94,12 @@ function parseArgs(): { command: string; options: Record<string, string> } {
   return { command, options };
 }
 
+function parseRatio(value: string): number {
+  const n = parseFloat(value);
+  if (Number.isNaN(n)) return NaN;
+  return n > 1 ? n / 100 : n;
+}
+
 function buildConfig(options: Record<string, string>): Partial<AgentConfig> {
   const config: Partial<AgentConfig> = {};
   
@@ -97,11 +111,43 @@ function buildConfig(options: Record<string, string>): Partial<AgentConfig> {
   }
   
   if (options.scan) {
-    config.yieldScanIntervalMs = parseInt(options.scan) * 60 * 1000;
+    const value = parseFloat(options.scan);
+    if (!Number.isNaN(value)) config.yieldScanIntervalMs = value * 60 * 1000;
   }
   
   if (options.analysis) {
-    config.fullAnalysisIntervalMs = parseInt(options.analysis) * 60 * 60 * 1000;
+    const value = parseFloat(options.analysis);
+    if (!Number.isNaN(value)) config.fullAnalysisIntervalMs = value * 60 * 60 * 1000;
+  }
+
+  if (options.minApy) {
+    const value = parseFloat(options.minApy);
+    if (!Number.isNaN(value)) config.minApyDifferential = value;
+  }
+
+  if (options.minNet) {
+    const value = parseFloat(options.minNet);
+    if (!Number.isNaN(value)) config.minNetBenefit = value;
+  }
+
+  if (options.maxChain) {
+    const value = parseRatio(options.maxChain);
+    if (!Number.isNaN(value)) config.maxChainExposure = value;
+  }
+
+  if (options.maxProtocol) {
+    const value = parseRatio(options.maxProtocol);
+    if (!Number.isNaN(value)) config.maxProtocolExposure = value;
+  }
+
+  if (options.maxTrade) {
+    const value = parseFloat(options.maxTrade);
+    if (!Number.isNaN(value)) config.maxSingleTradePercent = value;
+  }
+
+  if (options.pnlScale) {
+    const value = parseFloat(options.pnlScale);
+    if (!Number.isNaN(value)) config.pnlTimeScale = value;
   }
   
   return config;

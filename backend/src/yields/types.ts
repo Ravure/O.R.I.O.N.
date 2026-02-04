@@ -86,9 +86,15 @@ export interface YieldScannerConfig {
   
   /** Minimum APY to consider (default: 0%) */
   minApy?: number;
+
+  /** Maximum APY to consider (default: unlimited) */
+  maxApy?: number;
   
   /** Maximum risk score to consider (default: 7) */
   maxRiskScore?: number;
+
+  /** Only include stablecoin pools */
+  stablecoinOnly?: boolean;
   
   /** Only include these protocols (if specified) */
   includeProtocols?: string[];

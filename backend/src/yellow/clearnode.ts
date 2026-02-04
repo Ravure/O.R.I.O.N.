@@ -4,6 +4,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { keccak256, encodePacked, toHex, type Hex, createWalletClient, http } from 'viem';
 import { sepolia } from 'viem/chains';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   createAuthRequestMessage,
   createAuthVerifyMessage,
@@ -14,7 +16,8 @@ import {
   parseRPCResponse,
 } from '@erc7824/nitrolite';
 
-dotenv.config({ path: '../.env' });
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 /**
  * ClearNode WebSocket Client for Yellow Network
@@ -32,6 +35,9 @@ export class ClearNodeClient extends EventEmitter {
   private pendingRequests: Map<number, { resolve: Function; reject: Function }> = new Map();
   private sessionId: string | null = null;
   private manualDisconnect: boolean = false;
+  private isAuthenticated: boolean = false;
+  private autoAuthenticate: boolean = false;
+  private authInFlight: Promise<void> | null = null;
 
   // Trade statistics
   private tradeCount: number = 0;
@@ -75,6 +81,7 @@ export class ClearNodeClient extends EventEmitter {
       this.ws.on('close', () => {
         console.log('🔴 ClearNode connection closed');
         this.isConnected = false;
+        this.isAuthenticated = false;
         this.emit('disconnected');
         this.attemptReconnect();
       });
@@ -147,7 +154,16 @@ export class ClearNodeClient extends EventEmitter {
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       console.log(`🔄 Reconnecting... (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-      setTimeout(() => this.connect(), 2000 * this.reconnectAttempts);
+      setTimeout(async () => {
+        try {
+          await this.connect();
+          if (this.autoAuthenticate) {
+            await this.ensureAuthenticated();
+          }
+        } catch (error) {
+          // Errors already surfaced by connect/auth; allow further retries.
+        }
+      }, 2000 * this.reconnectAttempts);
     }
   }
 
@@ -188,6 +204,7 @@ export class ClearNodeClient extends EventEmitter {
     if (!this.isConnected || !this.ws) {
       throw new Error('Not connected to ClearNode');
     }
+    this.autoAuthenticate = true;
 
     // Auth request parameters
     const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 86400); // 24 hours from now
@@ -258,6 +275,7 @@ export class ClearNodeClient extends EventEmitter {
             console.log('✅ Authentication successful!');
             clearTimeout(authTimeout);
             this.ws!.off('message', handleAuthResponse);
+            this.isAuthenticated = true;
             resolve(message.res[2]);
           }
           
@@ -266,6 +284,7 @@ export class ClearNodeClient extends EventEmitter {
             console.log('❌ Auth error:', message.err);
             clearTimeout(authTimeout);
             this.ws!.off('message', handleAuthResponse);
+            this.isAuthenticated = false;
             reject(new Error(message.err[1] || message.err.error || 'Authentication failed'));
           }
         } catch (error) {
@@ -278,6 +297,20 @@ export class ClearNodeClient extends EventEmitter {
     });
   }
 
+  private async ensureAuthenticated(): Promise<void> {
+    if (this.isAuthenticated) return;
+    if (this.authInFlight) {
+      await this.authInFlight;
+      return;
+    }
+    this.authInFlight = this.authenticate()
+      .then(() => undefined)
+      .finally(() => {
+        this.authInFlight = null;
+      });
+    await this.authInFlight;
+  }
+
   /**
    * Get ledger balances from Yellow Network
    */
@@ -285,6 +318,7 @@ export class ClearNodeClient extends EventEmitter {
     if (!this.isConnected || !this.ws) {
       throw new Error('Not connected to ClearNode');
     }
+    await this.ensureAuthenticated();
 
     const messageSigner = createECDSAMessageSigner(this.privateKey as Hex);
     const balanceMessage = await createGetLedgerBalancesMessage(messageSigner, this.account.address);
@@ -324,6 +358,7 @@ export class ClearNodeClient extends EventEmitter {
     if (!this.isConnected || !this.ws) {
       throw new Error('Not connected to ClearNode');
     }
+    await this.ensureAuthenticated();
 
     const messageSigner = createECDSAMessageSigner(this.privateKey as Hex);
     const transferParams = {
@@ -566,6 +601,7 @@ export class ClearNodeClient extends EventEmitter {
     }
     this.isConnected = false;
     this.sessionId = null;
+    this.isAuthenticated = false;
   }
 }
 

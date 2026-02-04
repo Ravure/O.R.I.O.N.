@@ -144,7 +144,7 @@ async function runEndToEndProfitTest(): Promise<void> {
   log('📡 Fetching live data from DeFiLlama...', colors.yellow);
   
   const scanner = new YieldScanner({
-    minTvl: 1_000_000,      // Only pools with >$1M TVL (safer)
+    minTvlUsd: 1_000_000,   // Only pools with >$1M TVL (safer)
     minApy: 5,              // Minimum 5% APY
     maxApy: 100,            // Cap at 100% to avoid scams
     stablecoinOnly: true,   // Focus on stablecoins for lower risk
@@ -209,8 +209,8 @@ async function runEndToEndProfitTest(): Promise<void> {
   for (const route of bridgeRoutes) {
     try {
       const quote = await bridgeClient.getBridgeQuote({
-        fromChain: route.from,
-        toChain: route.to,
+        fromChainId: route.from,
+        toChainId: route.to,
         fromToken: SUPPORTED_CHAINS[route.from]?.usdc || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
         toToken: SUPPORTED_CHAINS[route.to]?.usdc || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
         amount: (parseFloat(testAmount) * 1e6).toString(),
@@ -220,8 +220,8 @@ async function runEndToEndProfitTest(): Promise<void> {
       if (quote) {
         results.bridgeQuotes++;
         const routeLabel = route.label.padEnd(25);
-        const bridge = (quote.toolDetails?.name || 'Unknown').slice(0, 10).padEnd(10);
-        const fee = formatUSD(parseFloat(quote.gasCostUSD || '0')).padStart(8);
+        const bridge = (quote.bridgeName || 'Unknown').slice(0, 10).padEnd(10);
+        const fee = formatUSD(parseFloat(quote.estimatedGas || '0')).padStart(8);
         const time = `${Math.round((quote.estimatedTime || 0) / 60)}min`.padStart(6);
         const output = formatUSD(parseFloat(quote.toAmount) / 1e6).padStart(8);
         

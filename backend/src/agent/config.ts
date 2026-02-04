@@ -94,6 +94,9 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   
   // Notifications
   notifications: DEFAULT_NOTIFICATION_CONFIG,
+
+  // P&L / Accounting
+  pnlTimeScale: 1,             // 1 = real time, >1 = accelerated accrual (demo)
 };
 
 // ============ Chain Configuration ============
@@ -164,6 +167,18 @@ export function validateAgentConfig(config: AgentConfig): { valid: boolean; erro
   if (config.maxChainExposure <= 0 || config.maxChainExposure > 1) {
     errors.push('maxChainExposure must be between 0 and 1');
   }
+
+  if (config.maxProtocolExposure <= 0 || config.maxProtocolExposure > 1) {
+    errors.push('maxProtocolExposure must be between 0 and 1');
+  }
+
+  if (config.maxSingleTradePercent <= 0 || config.maxSingleTradePercent > 100) {
+    errors.push('maxSingleTradePercent must be between 0 and 100');
+  }
+
+  if (config.minNetBenefit < 0) {
+    errors.push('minNetBenefit must be >= 0');
+  }
   
   if (config.maxSlippage < 0 || config.maxSlippage > 10) {
     errors.push('maxSlippage must be between 0 and 10');
@@ -172,9 +187,17 @@ export function validateAgentConfig(config: AgentConfig): { valid: boolean; erro
   if (config.yieldScanIntervalMs < 60000) {
     errors.push('yieldScanIntervalMs must be at least 60 seconds');
   }
+
+  if (config.fullAnalysisIntervalMs < 60000) {
+    errors.push('fullAnalysisIntervalMs must be at least 60 seconds');
+  }
   
   if (!['conservative', 'balanced', 'aggressive'].includes(config.riskProfile)) {
     errors.push('Invalid risk profile');
+  }
+
+  if (config.pnlTimeScale <= 0 || !Number.isFinite(config.pnlTimeScale)) {
+    errors.push('pnlTimeScale must be a positive number');
   }
   
   return { valid: errors.length === 0, errors };

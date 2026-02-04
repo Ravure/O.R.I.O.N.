@@ -14,7 +14,7 @@ import {
   RebalancePlan,
   ExecutionResult,
 } from './types.js';
-import { DEFAULT_AGENT_CONFIG, createAgentConfig } from './config.js';
+import { createAgentConfig, validateAgentConfig } from './config.js';
 import { YieldScanner } from '../yields/scanner.js';
 import { PortfolioTracker, getPortfolioTracker } from './portfolioTracker.js';
 import { DecisionEngine } from './decisionEngine.js';
@@ -41,7 +41,6 @@ export class OrionAgent {
   private scanCount: number = 0;
   private actionCount: number = 0;
   private consecutiveErrors: number = 0;
-  private totalPnl: number = 0;
   
   // Event handlers
   private eventHandlers: AgentEventHandler[] = [];
@@ -49,10 +48,14 @@ export class OrionAgent {
 
   constructor(config?: Partial<AgentConfig>, privateKey?: string) {
     this.config = createAgentConfig(config);
+    const validation = validateAgentConfig(this.config);
+    if (!validation.valid) {
+      throw new Error(`Invalid agent config: ${validation.errors.join(', ')}`);
+    }
     
     // Initialize components
     this.scanner = new YieldScanner({
-      minTvl: 100_000,
+      minTvlUsd: 100_000,
       minApy: 1,
       maxApy: 200,
       stablecoinOnly: true,
@@ -84,6 +87,18 @@ export class OrionAgent {
       // Connect to Yellow Network
       console.log('📡 Connecting to Yellow Network...');
       await this.executor.connect();
+
+      // Sync Yellow balance into portfolio so totalValue > 0 and rebalance decisions can run
+      const yellowBalances = await this.executor.getYellowBalance();
+      if (yellowBalances.length > 0) {
+        const forSync = yellowBalances.map((b) => ({
+          asset: b.asset,
+          amount: Math.round(b.amount * 1_000_000).toString(),
+        }));
+        await this.portfolio.syncWithYellowNetwork(forSync);
+        const portfolio = this.portfolio.getCurrentPortfolio();
+        console.log(`   💛 Portfolio synced: $${portfolio.totalValue.toFixed(2)} (Yellow balance)`);
+      }
       
       // Initial scan
       console.log('🔍 Running initial yield scan...');
@@ -170,6 +185,8 @@ export class OrionAgent {
    * Get current status
    */
   getStatus(): AgentStatus {
+    const portfolio = this.portfolio.getCurrentPortfolio();
+    const pnl = this.portfolio.calculatePnL();
     return {
       state: this.state,
       startTime: this.startTime,
@@ -177,9 +194,9 @@ export class OrionAgent {
       lastActionTime: this.lastActionTime,
       scanCount: this.scanCount,
       actionCount: this.actionCount,
-      totalPnl: this.totalPnl,
+      totalPnl: pnl.totalPnl,
       errors: [],
-      currentPortfolio: this.portfolio.getCurrentPortfolio(),
+      currentPortfolio: portfolio,
       nextScheduledAction: this.getNextScheduledAction(),
       uptime: Date.now() - this.startTime,
     };
@@ -314,12 +331,39 @@ export class OrionAgent {
     
     console.log(`\n📊 [${new Date().toLocaleTimeString()}] Running full analysis...`);
     
+    // Sync Yellow balance so portfolio reflects latest before deciding
+    const yellowBalances = await this.executor.getYellowBalance();
+    const idleYellowBalance = yellowBalances
+      .filter((b) => (b.asset || '').toLowerCase() === 'ytest.usd')
+      .reduce((sum, b) => sum + b.amount, 0);
+    if (yellowBalances.length > 0) {
+      const forSync = yellowBalances.map((b) => ({
+        asset: b.asset,
+        amount: Math.round(b.amount * 1_000_000).toString(),
+      }));
+      await this.portfolio.syncWithYellowNetwork(forSync);
+    }
+    
     // Get current data
-    const portfolio = this.portfolio.getCurrentPortfolio();
     const yields = await this.scanner.scanAllChains();
+
+    // Accrue yield on existing positions using last known APYs
+    this.portfolio.accrueYield(Date.now(), this.config.pnlTimeScale);
+
+    // Update position APYs from latest yield data for future accrual
+    const yieldMap = new Map<string, number>();
+    for (const pool of yields.allPools) {
+      const key = `${pool.chainId}-${pool.protocol}-${pool.pool}`.toLowerCase();
+      yieldMap.set(key, pool.apy);
+    }
+    this.portfolio.updateApysFromYieldData(yieldMap);
+
+    const portfolio = this.portfolio.getCurrentPortfolio();
     
     // Analyze
-    const decision = this.decision.analyze(portfolio, yields.allPools);
+    const decision = this.decision.analyze(portfolio, yields.allPools, {
+      idleBalanceOverride: idleYellowBalance,
+    });
     
     let result: any = { shouldAct: decision.shouldAct, reason: decision.reason };
     
@@ -342,8 +386,7 @@ export class OrionAgent {
       this.actionCount++;
       this.decision.markRebalanceExecuted();
       
-      // Update P&L
-      this.totalPnl += execResult.totalReceived - execResult.totalCost;
+      // P&L is derived from portfolio + trade history, not raw transfers.
       
       // Notify result
       await this.notifier.notifyExecutionResult(execResult);
@@ -353,6 +396,11 @@ export class OrionAgent {
     } else {
       console.log(`   ${decision.reason}`);
     }
+
+    const pnl = this.portfolio.calculatePnL();
+    console.log(
+      `   📈 P&L: $${pnl.totalPnl.toFixed(4)} (unrealized: $${pnl.unrealizedPnl.toFixed(4)}, costs: $${pnl.tradingCosts.toFixed(4)})`
+    );
     
     this.state = 'idle';
     

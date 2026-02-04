@@ -329,7 +329,7 @@ async function runRiskProfileStrategies(): Promise<void> {
   logSection('Step 2: Scan Real Yield Opportunities');
   
   const scanner = new YieldScanner({
-    minTvl: 100_000,
+    minTvlUsd: 100_000,
     minApy: 1,
     maxApy: 200,
     stablecoinOnly: true,

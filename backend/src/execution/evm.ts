@@ -13,6 +13,12 @@ export function getRpcUrl(chainId: number): string | null {
   if (chainId === 10) return process.env.OPTIMISM_RPC_URL || null;
   if (chainId === 137) return process.env.POLYGON_RPC_URL || null;
 
+  // Testnet fallbacks (matching .env provided in repo)
+  if (chainId === 11155111) return process.env.ALCHEMY_SEPOLIA_URL || process.env.SEPOLIA_RPC_URL || null;
+  if (chainId === 84532) return process.env.ALCHEMY_BASE_URL || process.env.BASE_SEPOLIA_RPC_URL || null;
+  if (chainId === 80002) return process.env.ALCHEMY_AMOY_URL || process.env.AMOY_RPC_URL || null;
+  if (chainId === 421614) return process.env.ALCHEMY_ARBITRUM_URL || process.env.ARBITRUM_SEPOLIA_RPC_URL || null;
+
   return null;
 }
 
@@ -70,4 +76,3 @@ export async function ensureErc20Approval(params: {
   const tx = await erc20.approve(params.spender, params.amount);
   await tx.wait();
 }
-

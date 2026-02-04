@@ -80,18 +80,27 @@ export class YieldScanner {
       }
     }
 
-    // 3. Apply risk filters
+    // 3. Apply basic filters (min/max APY, min TVL)
+    pools = pools.filter(pool => {
+      if (this.config.minApy !== undefined && pool.apy < this.config.minApy) return false;
+      if (this.config.maxApy !== undefined && pool.apy > this.config.maxApy) return false;
+      if (this.config.minTvlUsd !== undefined && pool.tvlUsd < this.config.minTvlUsd) return false;
+      if (this.config.stablecoinOnly && !pool.symbol.toUpperCase().includes('USDC')) return false;
+      return true;
+    });
+
+    // 4. Apply risk filters
     pools = pools.filter(pool => 
       !pool.riskScore || pool.riskScore <= (this.config.maxRiskScore ?? 10)
     );
 
-    // 4. Aggregate by chain
+    // 5. Aggregate by chain
     const yields = this.aggregateByChain(pools);
 
-    // 5. Find best overall opportunity
+    // 6. Find best overall opportunity
     const bestOpportunity = this.findBestOpportunity(pools);
 
-    // 6. Calculate stats
+    // 7. Calculate stats
     const stats = this.calculateStats(pools, yields);
 
     const result: YieldScanResult = {
