@@ -15,19 +15,33 @@
         "scan:yields": "tsx src/scripts/scanYields.ts",
         "bridge:test": "tsx src/scripts/testBridge.ts",
         "bridge:demo": "tsx src/scripts/demoBridge.ts",
+        "e2e:profit": "tsx src/scripts/endToEndProfit.ts",
+        "strategy:risk": "tsx src/scripts/riskProfileStrategies.ts",
+        "agent:start": "tsx src/scripts/runAgent.ts start",
+        "agent:once": "tsx src/scripts/runAgent.ts once",
+        "agent:demo": "tsx src/scripts/runAgent.ts demo",
+        "agent:status": "tsx src/scripts/runAgent.ts status",
+        "agent:test": "tsx src/scripts/testAgent.ts",
+        "agent:production": "tsx src/scripts/productionTest.ts",
+        "agent:maxprofit": "tsx src/scripts/maxProfitRun.ts",
+        "live:deposit": "tsx src/scripts/liveYieldDeposit.ts",
         "testnet:aave:deposit": "tsx src/scripts/testnetAaveMintAndDeposit.ts"
     },
     "dependencies": {
         "@bgd-labs/aave-address-book": "^4.44.2",
         "@erc7824/nitrolite": "^0.5.3",
         "@lifi/sdk": "^3.4.1",
+        "better-sqlite3": "^11.0.0",
         "dotenv": "^16.3.1",
         "ethers": "^6.9.0",
+        "uuid": "^9.0.1",
         "viem": "^2.45.1",
         "ws": "^8.16.0"
     },
     "devDependencies": {
+        "@types/better-sqlite3": "^7.6.8",
         "@types/node": "^20.10.0",
+        "@types/uuid": "^9.0.8",
         "@types/ws": "^8.5.10",
         "tsx": "^4.7.0",
         "typescript": "^5.3.3"
