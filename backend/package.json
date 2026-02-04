@@ -14,9 +14,11 @@
         "verify:live": "tsx src/scripts/verifyLiveTrades.ts",
         "scan:yields": "tsx src/scripts/scanYields.ts",
         "bridge:test": "tsx src/scripts/testBridge.ts",
-        "bridge:demo": "tsx src/scripts/demoBridge.ts"
+        "bridge:demo": "tsx src/scripts/demoBridge.ts",
+        "testnet:aave:deposit": "tsx src/scripts/testnetAaveMintAndDeposit.ts"
     },
     "dependencies": {
+        "@bgd-labs/aave-address-book": "^4.44.2",
         "@erc7824/nitrolite": "^0.5.3",
         "@lifi/sdk": "^3.4.1",
         "dotenv": "^16.3.1",
