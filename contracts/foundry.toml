@@ -7,6 +7,15 @@ optimizer = true
 optimizer_runs = 1000000
 via_ir = true
 
+# Remappings for Uniswap v4 (use v4-periphery's embedded v4-core for version compatibility)
+remappings = [
+    "@uniswap/v4-core/=lib/v4-periphery/lib/v4-core/",
+    "v4-core/=lib/v4-periphery/lib/v4-core/",
+    "v4-periphery/=lib/v4-periphery/",
+    "@openzeppelin/=lib/v4-periphery/lib/v4-core/lib/openzeppelin-contracts/",
+    "forge-std/=lib/forge-std/src/",
+]
+
 # Use .env from parent directory
 fs_permissions = [{ access = "read", path = "../.env" }]
 

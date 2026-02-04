@@ -11,10 +11,14 @@
         "yellow:test": "tsx src/scripts/testYellow.ts",
         "demo:trades": "tsx src/scripts/demoTrades.ts",
         "demo:analytics": "tsx src/scripts/gasAnalytics.ts",
-        "verify:live": "tsx src/scripts/verifyLiveTrades.ts"
+        "verify:live": "tsx src/scripts/verifyLiveTrades.ts",
+        "scan:yields": "tsx src/scripts/scanYields.ts",
+        "bridge:test": "tsx src/scripts/testBridge.ts",
+        "bridge:demo": "tsx src/scripts/demoBridge.ts"
     },
     "dependencies": {
         "@erc7824/nitrolite": "^0.5.3",
+        "@lifi/sdk": "^3.4.1",
         "dotenv": "^16.3.1",
         "ethers": "^6.9.0",
         "viem": "^2.45.1",

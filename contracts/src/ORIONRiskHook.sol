@@ -5,9 +5,42 @@ import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+
+// ============ ENS Interface Definitions ============
+
+/**
+ * @notice ENS Registry interface for looking up resolvers
+ */
+interface IENS {
+    function resolver(bytes32 node) external view returns (address);
+}
+
+/**
+ * @notice ENS Reverse Registrar interface for address -> node mapping
+ */
+interface IReverseRegistrar {
+    function node(address addr) external pure returns (bytes32);
+}
+
+/**
+ * @notice ENS Name Resolver interface for reverse resolution
+ */
+interface INameResolver {
+    function name(bytes32 node) external view returns (string memory);
+}
+
+/**
+ * @notice ENS Public Resolver interface for text records
+ */
+interface IPublicResolver {
+    function text(bytes32 node, string calldata key) external view returns (string memory);
+    function name(bytes32 node) external view returns (string memory);
+}
 
 /**
  * @title ORION Risk Hook
@@ -21,6 +54,8 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
  * - Logs all trades for transparency
  */
 contract ORIONRiskHook is BaseHook {
+    using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     // ============ Errors ============
 
@@ -188,13 +223,16 @@ contract ORIONRiskHook is BaseHook {
      * @return The ENS name or empty string if none
      */
     function _getENSName(address user) internal view returns (string memory) {
-        // In production, would call ENS Reverse Registrar
-        // For demo/testing, we'll use a simplified version
-
-        // TODO: Implement actual ENS reverse resolution
-        // Example: ReverseRegistrar(ensReverseRegistrar).getName(user);
-
-        return ""; // Placeholder
+        // Calculate the reverse node for the address
+        // Format: <address>.addr.reverse
+        bytes32 reverseNode = IReverseRegistrar(ensReverseRegistrar).node(user);
+        
+        // Try to get the name from the resolver
+        try IPublicResolver(ensPublicResolver).name(reverseNode) returns (string memory name) {
+            return name;
+        } catch {
+            return "";
+        }
     }
 
     /**
@@ -207,13 +245,17 @@ contract ORIONRiskHook is BaseHook {
         view
         returns (string memory)
     {
-        // In production, would call ENS Public Resolver
-        // Example:
-        // bytes32 node = namehash(ensName);
-        // string memory profile = Resolver(ensPublicResolver).text(node, "risk_profile");
-
-        // For now, default to "low" for safety
-        return "low"; // Placeholder
+        bytes32 node = _namehash(ensName);
+        
+        try IPublicResolver(ensPublicResolver).text(node, "risk_profile") returns (string memory profile) {
+            // If no profile set, default to "low" for safety
+            if (bytes(profile).length == 0) {
+                return "low";
+            }
+            return profile;
+        } catch {
+            return "low";
+        }
     }
 
     /**
@@ -230,18 +272,25 @@ contract ORIONRiskHook is BaseHook {
         view
         returns (uint256)
     {
+        bytes32 node = _namehash(ensName);
+        
         // Try to read custom max_slippage from ENS
-        // If not set, use default for risk level
-
-        // TODO: Read from ENS
-        // string memory customSlippage = Resolver(ensPublicResolver).text(node, "max_slippage");
-
-        // Use default for risk level
+        try IPublicResolver(ensPublicResolver).text(node, "max_slippage") returns (string memory slippageStr) {
+            if (bytes(slippageStr).length > 0) {
+                // Parse string to basis points (e.g., "0.5" -> 50 bp)
+                uint256 customSlippage = _parseSlippageString(slippageStr);
+                if (customSlippage > 0) {
+                    return customSlippage;
+                }
+            }
+        } catch {}
+        
+        // Fallback to default for risk level
         return riskLevelMaxSlippage[riskProfile];
     }
 
     /**
-     * @notice Estimates price impact/slippage for a swap
+     * @notice Estimates price impact/slippage for a swap using pool liquidity
      * @param key The pool key
      * @param params Swap parameters
      * @return Estimated slippage in basis points
@@ -254,20 +303,119 @@ contract ORIONRiskHook is BaseHook {
         view
         returns (uint256)
     {
-        // Simplified slippage calculation
-        // In production, would use TWAP oracle and pool reserves
-
-        // For demo purposes, estimate based on swap size
-        // Larger swaps = more slippage
+        // Get pool ID
+        PoolId poolId = key.toId();
+        
+        // Get current pool liquidity
+        uint128 liquidity = poolManager.getLiquidity(poolId);
+        
+        // If no liquidity, return max slippage
+        if (liquidity == 0) {
+            return 200; // 2% max
+        }
+        
+        // Calculate swap size
         uint256 swapSize = params.amountSpecified > 0
             ? uint256(int256(params.amountSpecified))
             : uint256(-int256(params.amountSpecified));
+        
+        // Estimate price impact based on swap size relative to liquidity
+        // Formula: impact = (swapSize * 10000) / (liquidity * tickSpacing factor)
+        // This is a simplified model - production would use proper AMM math
+        uint256 liquidityFactor = uint256(liquidity) / 1e12; // Normalize liquidity
+        if (liquidityFactor == 0) liquidityFactor = 1;
+        
+        uint256 impact = (swapSize * 100) / liquidityFactor;
+        
+        // Cap at 2% (200 basis points)
+        return impact > 200 ? 200 : impact;
+    }
 
-        // Simple heuristic: 0.1% slippage per 10k units
-        // This is a placeholder - real implementation would use pool math
-        uint256 estimated = (swapSize / 10000) * 10; // 10 bp per 10k
+    /**
+     * @notice Computes ENS namehash for a domain name
+     * @param name The ENS name (e.g., "vitalik.eth")
+     * @return The namehash as bytes32
+     */
+    function _namehash(string memory name) internal pure returns (bytes32) {
+        bytes32 node = bytes32(0);
+        
+        if (bytes(name).length == 0) {
+            return node;
+        }
+        
+        // Split by '.' and hash iteratively (right to left)
+        // For "vitalik.eth": hash("eth"), then hash("vitalik" + previous)
+        bytes memory nameBytes = bytes(name);
+        uint256 lastDot = nameBytes.length;
+        
+        for (uint256 i = nameBytes.length; i > 0; i--) {
+            if (nameBytes[i - 1] == '.') {
+                // Hash the label from i to lastDot
+                bytes memory label = _slice(nameBytes, i, lastDot);
+                node = keccak256(abi.encodePacked(node, keccak256(label)));
+                lastDot = i - 1;
+            }
+        }
+        
+        // Hash the final (leftmost) label
+        bytes memory firstLabel = _slice(nameBytes, 0, lastDot);
+        node = keccak256(abi.encodePacked(node, keccak256(firstLabel)));
+        
+        return node;
+    }
 
-        return estimated;
+    /**
+     * @notice Extracts a slice from a bytes array
+     * @param data The source bytes
+     * @param start Start index
+     * @param end End index (exclusive)
+     * @return The sliced bytes
+     */
+    function _slice(bytes memory data, uint256 start, uint256 end) internal pure returns (bytes memory) {
+        bytes memory result = new bytes(end - start);
+        for (uint256 i = start; i < end; i++) {
+            result[i - start] = data[i];
+        }
+        return result;
+    }
+
+    /**
+     * @notice Parses a slippage string like "0.5" into basis points (50)
+     * @param slippageStr The string representation (e.g., "0.5" for 0.5%)
+     * @return Slippage in basis points
+     */
+    function _parseSlippageString(string memory slippageStr) internal pure returns (uint256) {
+        bytes memory b = bytes(slippageStr);
+        uint256 result = 0;
+        uint256 decimals = 0;
+        bool foundDecimal = false;
+        
+        for (uint256 i = 0; i < b.length; i++) {
+            if (b[i] == '.') {
+                foundDecimal = true;
+                continue;
+            }
+            if (b[i] >= '0' && b[i] <= '9') {
+                result = result * 10 + (uint8(b[i]) - 48);
+                if (foundDecimal) {
+                    decimals++;
+                }
+            }
+        }
+        
+        // Convert to basis points (1% = 100 bp)
+        // If input is "0.5" -> result=5, decimals=1 -> 5 * 100 / 10 = 50 bp
+        // If input is "1.0" -> result=10, decimals=1 -> 10 * 100 / 10 = 100 bp
+        if (decimals == 0) {
+            return result * 100; // Whole number percentage
+        }
+        
+        uint256 divisor = 1;
+        for (uint256 i = 0; i < decimals; i++) {
+            divisor *= 10;
+        }
+        
+        return (result * 100) / divisor;
     }
 
     // ============ Admin Functions ============
