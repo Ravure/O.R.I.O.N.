@@ -10,6 +10,7 @@ import {
   createEIP712AuthMessageSigner,
   createTransferMessage,
   createECDSAMessageSigner,
+  createGetLedgerBalancesMessage,
   parseRPCResponse,
 } from '@erc7824/nitrolite';
 
@@ -274,6 +275,96 @@ export class ClearNodeClient extends EventEmitter {
 
       this.ws!.on('message', handleAuthResponse);
       this.ws!.send(authRequest);
+    });
+  }
+
+  /**
+   * Get ledger balances from Yellow Network
+   */
+  async getLedgerBalances(): Promise<any> {
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
+
+    const messageSigner = createECDSAMessageSigner(this.privateKey as Hex);
+    const balanceMessage = await createGetLedgerBalancesMessage(messageSigner, this.account.address);
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Balance request timeout')), 15000);
+
+      const handler = (data: Buffer) => {
+        const message = JSON.parse(data.toString());
+
+        if (message.res?.[1] === 'get_ledger_balances') {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          resolve(message.res[2]);
+        }
+
+        if (message.err) {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          reject(new Error(message.err[1] || 'Failed to get balances'));
+        }
+      };
+
+      this.ws!.on('message', handler);
+      this.ws!.send(balanceMessage);
+    });
+  }
+
+  /**
+   * Execute a REAL transfer on Yellow Network (off-chain, zero gas)
+   */
+  async transfer(params: {
+    destination: string;
+    asset: string;
+    amount: string;
+  }): Promise<any> {
+    if (!this.isConnected || !this.ws) {
+      throw new Error('Not connected to ClearNode');
+    }
+
+    const messageSigner = createECDSAMessageSigner(this.privateKey as Hex);
+    const transferParams = {
+      destination: params.destination as `0x${string}`,
+      allocations: [
+        { asset: params.asset, amount: params.amount }
+      ],
+    };
+
+    const transferMessage = await createTransferMessage(messageSigner, transferParams);
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Transfer timeout')), 30000);
+
+      const handler = (data: Buffer) => {
+        const message = JSON.parse(data.toString());
+
+        if (message.res?.[1] === 'transfer') {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          
+          // Update stats
+          const tx = message.res[2].transactions?.[0];
+          if (tx) {
+            this.tradeCount++;
+            this.totalVolume += parseFloat(tx.amount) / 1000000; // Convert from 6 decimals
+            this.gasSaved += 11.25; // ~$11.25 saved per trade (150k gas * 30 gwei * $2500 ETH)
+          }
+          
+          resolve(message.res[2]);
+        }
+
+        if (message.err || message.res?.[1] === 'error') {
+          clearTimeout(timeout);
+          this.ws!.off('message', handler);
+          reject(new Error(message.err?.[1] || message.res?.[2]?.error || 'Transfer failed'));
+        }
+      };
+
+      this.ws!.on('message', handler);
+      this.ws!.send(transferMessage);
     });
   }
 
